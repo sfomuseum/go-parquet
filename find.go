@@ -8,10 +8,6 @@ import (
 	"github.com/parquet-go/parquet-go"
 )
 
-type Id interface {
-	string | int64
-}
-
 // FindRecordById scans any parquet schema by an ID field.
 // T: Represents the Go struct model to return
 // K: Represents the search key type (string or int64)
