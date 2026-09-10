@@ -41,6 +41,8 @@ func NewWriter[T any](ctx context.Context, uri string) (*ParquetWriter[T], error
 	switch uri {
 	case "-":
 		wr = NopWriteCloser(os.Stdout)
+	case "/dev/null":
+		wr = NopWriteCloser(io.Discard)
 	default:
 
 		abs_uri, err := filepath.Abs(uri)

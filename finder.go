@@ -13,16 +13,34 @@ type Id interface {
 }
 
 // FindRecordById scans any parquet schema by an ID field.
-// T: Represents the Go struct model to return (e.g., Record)
+// T: Represents the Go struct model to return
 // K: Represents the search key type (string or int64)
-func FindRecordById[T any, K Id](uri string, targetID K) (T, error) {
+func FindRecordById[T any, K Id](uri string, id K) (T, error) {
 
 	var zero T
+
+	rsp, err := FindRecordByIdAll[T, K](uri, id)
+
+	if err != nil {
+		return zero, err
+	}
+
+	switch len(rsp) {
+	case 1:
+		return rsp[0], nil
+	case 0:
+		return zero, fmt.Errorf("Not found")
+	default:
+		return zero, fmt.Errorf("Multiple results")
+	}
+}
+
+func FindRecordByIdAll[T any, K Id](uri string, id K) ([]T, error) {
 
 	file, sz, err := OpenURI(uri)
 
 	if err != nil {
-		return zero, err
+		return nil, err
 	}
 
 	defer file.Close()
@@ -30,15 +48,33 @@ func FindRecordById[T any, K Id](uri string, targetID K) (T, error) {
 	pf, err := parquet.OpenFile(file, sz)
 
 	if err != nil {
-		return zero, err
+		return nil, err
 	}
 
-	return FindRecordByIdWithParquetFile[T, K](file, pf, targetID)
+	return FindRecordByIdWithParquetFileAll[T, K](file, pf, id)
 }
 
 func FindRecordByIdWithParquetFile[T any, K Id](file io.ReaderAt, pf *parquet.File, id K) (T, error) {
 
 	var zero T
+
+	rsp, err := FindRecordByIdWithParquetFileAll[T, K](file, pf, id)
+
+	if err != nil {
+		return zero, err
+	}
+
+	switch len(rsp) {
+	case 1:
+		return rsp[0], nil
+	case 0:
+		return zero, fmt.Errorf("Not found")
+	default:
+		return zero, fmt.Errorf("Multiple results")
+	}
+}
+
+func FindRecordByIdWithParquetFileAll[T any, K Id](file io.ReaderAt, pf *parquet.File, id K) ([]T, error) {
 
 	id_idx := -1
 
@@ -68,6 +104,7 @@ func FindRecordByIdWithParquetFile[T any, K Id](file io.ReaderAt, pf *parquet.Fi
 	}
 
 	var row_idx int64 = 0
+	var matched_idx []int64
 
 	for _, rg := range pf.RowGroups() {
 
@@ -104,7 +141,7 @@ func FindRecordByIdWithParquetFile[T any, K Id](file io.ReaderAt, pf *parquet.Fi
 				}
 
 				id_pages.Close()
-				return zero, err
+				return nil, err
 			}
 
 			// Branch depending on key type for optimized vector scans
@@ -123,9 +160,11 @@ func FindRecordByIdWithParquetFile[T any, K Id](file io.ReaderAt, pf *parquet.Fi
 					for i := 0; i < n; i++ {
 
 						if id_buf[i] == target {
-							id_pages.Close()
-							exactRowIndex := row_idx + int64(i)
-							return fetchFullRowAt[T](file, exactRowIndex)
+							// id_pages.Close()
+							// exactRowIndex := row_idx + int64(i)
+							// return fetchFullRowAt[T](file, exactRowIndex)
+
+							matched_idx = append(matched_idx, row_idx+int64(i))
 						}
 					}
 
@@ -143,9 +182,11 @@ func FindRecordByIdWithParquetFile[T any, K Id](file io.ReaderAt, pf *parquet.Fi
 
 				for i := 0; i < n; i++ {
 					if values[i].String() == target {
-						id_pages.Close()
-						exact_idx := row_idx + int64(i)
-						return fetchFullRowAt[T](file, exact_idx)
+						// id_pages.Close()
+						// exact_idx := row_idx + int64(i)
+						// return fetchFullRowAt[T](file, exact_idx)
+
+						matched_idx = append(matched_idx, row_idx+int64(i))
 					}
 				}
 				row_idx += int64(n)
@@ -167,9 +208,10 @@ func FindRecordByIdWithParquetFile[T any, K Id](file io.ReaderAt, pf *parquet.Fi
 				}
 
 				if match {
-					id_pages.Close()
-					exact_idx := row_idx + int64(i)
-					return fetchFullRowAt[T](file, exact_idx)
+					//id_pages.Close()
+					//exact_idx := row_idx + int64(i)
+					//return fetchFullRowAt[T](file, exact_idx)
+					matched_idx = append(matched_idx, row_idx+int64(i))
 				}
 			}
 
@@ -179,33 +221,36 @@ func FindRecordByIdWithParquetFile[T any, K Id](file io.ReaderAt, pf *parquet.Fi
 		id_pages.Close()
 	}
 
-	return zero, fmt.Errorf("id not found in parquet archive")
+	// return zero, fmt.Errorf("id not found in parquet archive")
+	return fetchFullRowsAt[T](file, matched_idx)
 }
 
-// Reconstructs only the requested matching row from all column chunks
-func fetchFullRowAt[T any](file io.ReaderAt, row_idx int64) (T, error) {
-
-	var null_row T
+func fetchFullRowsAt[T any](file io.ReaderAt, row_idx []int64) ([]T, error) {
 
 	reader := parquet.NewGenericReader[T](file)
 	defer reader.Close()
 
-	err := reader.SeekToRow(row_idx)
+	results := make([]T, 0, len(row_idx))
+	buffer := make([]T, 1)
 
-	if err != nil {
-		return null_row, err
+	for _, idx := range row_idx {
+
+		err := reader.SeekToRow(idx)
+
+		if err != nil {
+			return nil, err
+		}
+
+		n, err := reader.Read(buffer)
+
+		if n > 0 {
+			results = append(results, buffer[0])
+		}
+
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
 	}
 
-	rows := make([]T, 1)
-	n, err := reader.Read(rows)
-
-	if n > 0 {
-		return rows[0], nil
-	}
-
-	if err != nil && !errors.Is(err, io.EOF) {
-		return null_row, err
-	}
-
-	return null_row, fmt.Errorf("failed to hydrate record at row %d", row_idx)
+	return results, nil
 }
