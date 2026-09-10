@@ -217,34 +217,44 @@ func FindRecordByIdWithParquetFileAll[T any, K Id](file io.ReaderAt, pf *parquet
 		id_pages.Close()
 	}
 
-	// return zero, fmt.Errorf("id not found in parquet archive")
-	return fetchFullRowsAt[T](file, matched_idx)
+	return fetchFullRowsAt[T](file, pf, matched_idx)
 }
 
-func fetchFullRowsAt[T any](file io.ReaderAt, row_idx []int64) ([]T, error) {
+func fetchFullRowsAt[T any](file io.ReaderAt, pf *parquet.File, row_idx []int64) ([]T, error) {
 
-	reader := parquet.NewGenericReader[T](file)
+	reader := parquet.NewReader(file, pf.Schema())
 	defer reader.Close()
 
 	results := make([]T, 0, len(row_idx))
-	buffer := make([]T, 1)
+	buf := make([]parquet.Row, 1)
+
+	schema := parquet.SchemaOf(new(T))
 
 	for _, idx := range row_idx {
 
 		err := reader.SeekToRow(idx)
 
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Failed to seek to row at index %d, %w", idx, err)
 		}
 
-		n, err := reader.Read(buffer)
+		n, err := reader.ReadRows(buf)
 
 		if n > 0 {
-			results = append(results, buffer[0])
+
+			var record T
+
+			err := schema.Reconstruct(&record, buf[0])
+
+			if err != nil {
+				return nil, fmt.Errorf("Failed reconstructing record from schema, %w", err)
+			}
+
+			results = append(results, record)
 		}
 
 		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, err
+			return nil, fmt.Errorf("Read error, %w", err)
 		}
 	}
 
