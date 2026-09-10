@@ -1,3 +1,5 @@
+//go:build !wasmjs
+
 package parquet
 
 import (

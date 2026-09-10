@@ -7,6 +7,7 @@ package parquet
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"syscall/js"
 )
@@ -81,17 +82,17 @@ func (j *jsStreamReader) Close() error {
 }
 
 // OpenURI opens a remote parquet asset via Browser Fetch without memory pre-allocations.
-func OpenURI(uri string) (ReadCloserAt, error) {
+func OpenURI(uri string) (ReadCloserAt, int64, error) {
 
 	if strings.HasPrefix(uri, "file://") || !strings.Contains(uri, "://") {
-		return nil, fmt.Errorf("parquet.OpenURI: local file access is disabled in WASM environments")
+		return nil, 0, fmt.Errorf("parquet.OpenURI: local file access is disabled in WASM environments")
 	}
 
 	global := js.Global()
 	fetch := global.Get("fetch")
 
 	if fetch.Type() == js.TypeUndefined {
-		return nil, fmt.Errorf("parquet.OpenURI: global fetch API not found in this environment")
+		return nil, 0, fmt.Errorf("parquet.OpenURI: global fetch API not found in this environment")
 	}
 
 	// Trigger the asynchronous JS fetch function
@@ -109,6 +110,7 @@ func OpenURI(uri string) (ReadCloserAt, error) {
 		return nil
 
 	})
+
 	defer fetch_onsuccess.Release()
 
 	fetch_onfailure := js.FuncOf(func(this js.Value, args []js.Value) any {
@@ -126,7 +128,7 @@ func OpenURI(uri string) (ReadCloserAt, error) {
 	res := <-done_ch
 
 	if res.err != nil {
-		return nil, res.err
+		return nil, 0, res.err
 	}
 
 	// Verify HTTP Ok response codes
@@ -135,19 +137,31 @@ func OpenURI(uri string) (ReadCloserAt, error) {
 
 	if !ok {
 		status := res.resp.Get("status").Int()
-		return nil, fmt.Errorf("parquet.OpenURI: bad server response status: %d", status)
+		return nil, 0, fmt.Errorf("parquet.OpenURI: bad server response status: %d", status)
+	}
+
+	// Extract Content-Length header to determine parquet size
+	var contentLength int64
+	headers := res.resp.Get("headers")
+	if headers.Type() != js.TypeUndefined && headers.Type() != js.TypeNull {
+		clValue := headers.Call("get", "content-length")
+		if clValue.Type() == js.TypeString {
+			if parsed, err := strconv.ParseInt(clValue.String(), 10, 64); err == nil {
+				contentLength = parsed
+			}
+		}
 	}
 
 	// Pull the streaming body pointer and spin up a reader
 	body_str := res.resp.Get("body")
 
 	if body_str.Type() == js.TypeNull || body_str.Type() == js.TypeUndefined {
-		return nil, fmt.Errorf("parquet.OpenURI: response body is not readable")
+		return nil, 0, fmt.Errorf("parquet.OpenURI: response body is not readable")
 	}
 
-	reader := body_st.Call("getReader")
+	reader := body_str.Call("getReader")
 	lazy_str := &jsStreamReader{reader: reader}
 
 	// Route into your provided cachedReaderAt layout to lazily consume 4KB blocks
-	return NewCachedReaderAt(lazy_str), nil
+	return NewCachedReaderAt(lazy_str), contentLength, nil
 }
