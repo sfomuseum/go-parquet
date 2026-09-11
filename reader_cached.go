@@ -1,3 +1,5 @@
+//go:build !wasmjs
+
 package parquet
 
 import (
@@ -6,19 +8,15 @@ import (
 	"sync"
 )
 
-var _ ReadCloserAt = (*cachedReaderAt)(nil)
-
 // Create a wrapper interface that bundles all required behaviors
 type ReadCloserAt interface {
 	io.ReaderAt
 	io.Closer
 }
 
-// Ensure cachedReaderAt implements our new interface
+// Ensure cachedReaderAt implements our interface
 var _ ReadCloserAt = (*cachedReaderAt)(nil)
 
-// Internal data structure to wrap net/http.Response.Body instances
-// so we don't read the whole document over the wire before processing
 type cachedReaderAt struct {
 	src    io.ReadCloser
 	buf    []byte
@@ -43,13 +41,10 @@ func (c *cachedReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	defer c.mu.Unlock()
 
 	reqEnd := off + int64(len(p))
-
-	// Reuse a single buffer allocation across iterations for this call
 	var tmp []byte
 
 	// Pull data into cache until we satisfy the request or hit EOF/error
 	for reqEnd > int64(len(c.buf)) && !c.closed {
-
 		if tmp == nil {
 			tmp = make([]byte, 4096)
 		}
@@ -61,7 +56,7 @@ func (c *cachedReaderAt) ReadAt(p []byte, off int64) (int, error) {
 		if err != nil {
 			c.closed = true
 			if err != io.EOF {
-				c.err = err // Store the unexpected network error
+				c.err = err
 			}
 			break
 		}
@@ -69,7 +64,7 @@ func (c *cachedReaderAt) ReadAt(p []byte, off int64) (int, error) {
 
 	bufLen := int64(len(c.buf))
 
-	// Case 1: The requested offset starts past the total data we have
+	// Case 1: Offset is completely out of bounds
 	if off >= bufLen {
 		if c.err != nil {
 			return 0, c.err
@@ -77,7 +72,7 @@ func (c *cachedReaderAt) ReadAt(p []byte, off int64) (int, error) {
 		return 0, io.EOF
 	}
 
-	// Case 2: We have partial data matching the offset, but less than requested
+	// Case 2: Partial data match
 	if reqEnd > bufLen {
 		n := copy(p, c.buf[off:])
 		if c.err != nil {
@@ -86,23 +81,20 @@ func (c *cachedReaderAt) ReadAt(p []byte, off int64) (int, error) {
 		return n, io.EOF
 	}
 
-	// Case 3: We have a full match in the cache
+	// Case 3: Complete match satisfied safely
 	n := copy(p, c.buf[off:reqEnd])
 	return n, nil
 }
 
-// Close safely tears down the underlying reader
 func (c *cachedReaderAt) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Prevent double-closing errors
 	if c.closed && c.err == io.ErrClosedPipe {
 		return nil
 	}
 
 	c.closed = true
 	c.err = io.ErrClosedPipe
-
 	return c.src.Close()
 }
